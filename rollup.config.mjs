@@ -15,6 +15,6 @@ export default {
         nodeResolve(),
         dynamicImportVars(),
         // Uncomment for minification
-        terser()
+        // terser()
     ]
 };

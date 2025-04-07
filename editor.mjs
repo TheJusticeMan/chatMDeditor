@@ -50,24 +50,35 @@ Object.values(editors).forEach(e => e.dom.style.display = "none");
 document.getElementById("editor").style.display = "block";
 
 const buttons = [
-    { buttonId: "HTMLFileTab", order: ["editor", "cssEditor", "jsEditor", "chatMDEditor"] },
-    { buttonId: "CSSFileTab", order: ["cssEditor", "editor", "jsEditor", "chatMDEditor"] },
-    { buttonId: "JSFileTab", order: ["jsEditor", "cssEditor", "editor", "chatMDEditor"] },
-    { buttonId: "chatMDTab", order: ["chatMDEditor", "editor", "cssEditor", "jsEditor"] },
+    { buttonId: "HTMLFileTab", order: ["editor", "cssEditor", "jsEditor", "chatMDEditor"], editor: editors.editor },
+    { buttonId: "CSSFileTab", order: ["cssEditor", "editor", "jsEditor", "chatMDEditor"], editor: editors.cssEditor },
+    { buttonId: "JSFileTab", order: ["jsEditor", "cssEditor", "editor", "chatMDEditor"], editor: editors.jsEditor },
+    { buttonId: "chatMDTab", order: ["chatMDEditor", "editor", "cssEditor", "jsEditor"], editor: editors.chatMD },
 ];
 
-function setButtonEvents(buttons) {
-    buttons.forEach(({ buttonId, order }) => {
-        const button = document.getElementById(buttonId);
-        button.addEventListener("click", () => {
-            buttons.forEach(({ buttonId }) => document.getElementById(buttonId).classList.remove("selected"));
-            button.classList.add("selected");
-            order.forEach((id, idx) => document.getElementById(id).style.display = idx === 0 ? "block" : "none");
-        });
-    });
+function handleButtonClick(buttonId, order, editor) {
+    localStorage.setItem("activeTab", buttonId);
+    buttons.forEach(({ buttonId }) => document.getElementById(buttonId).classList.remove("selected"));
+    document.getElementById(buttonId).classList.add("selected");
+    order.forEach((id, idx) => document.getElementById(id).style.display = idx === 0 ? "block" : "none");
+    editor.focus();
+        // Set the tab name in the url
+        const newUrl = new URL(window.location.href);
+        newUrl.searchParams.set('tab', buttonId);
+        window.history.replaceState({}, '', newUrl);
+    
 }
 
-setButtonEvents(buttons);
+function setButtonEvents(buttons, activeTab) {
+    buttons.forEach(({ buttonId, order, editor }) => {
+        const button = document.getElementById(buttonId);
+        button.addEventListener("click", () => handleButtonClick(buttonId, order, editor));
+
+        if (activeTab === buttonId) {
+            handleButtonClick(buttonId, order, editor);
+        }
+    });
+}
 
 async function fetchText(url) {
     const response = await fetch(url);
@@ -163,14 +174,19 @@ document.getElementById("Download").addEventListener("click", async () => {
 });
 
 let isSynchronizing = false;
+let previousUrls = { cssUrl: null, jsUrl: null, contentUrl: null };
 
 function setPreviewContent(content, cssContent, jsContent) {
+    // get the time for calculating the time it took to load the preview
+    const startTime = performance.now();
     if (isSynchronizing) return;
     isSynchronizing = true;
+
     const cssBlob = new Blob([cssContent], { type: "text/css" });
     const jsBlob = new Blob([jsContent], { type: "text/javascript" });
     const cssUrl = URL.createObjectURL(cssBlob);
     const jsUrl = URL.createObjectURL(jsBlob);
+
     const cssRegex = /<link\s+rel=["']stylesheet["']\s+href=["'][^"']*["'][^>]*>/gi;
     const scriptRegex = /<script\s+src=["'][^"']*["'][^>]*><\/script>/gi;
     const processedContent = content
@@ -178,15 +194,28 @@ function setPreviewContent(content, cssContent, jsContent) {
         .replace(scriptRegex, `<script src="${jsUrl}"></script>`);
 
     const blob = new Blob([processedContent], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
+    const contentUrl = URL.createObjectURL(blob);
+
     const previewFrame = document.getElementById("previewFrame");
-    previewFrame.src = url;
+
     previewFrame.onload = () => {
         const livePreview = previewFrame.contentDocument || previewFrame.contentWindow.document;
         livePreview.body.contentEditable = true;
         livePreview.body.addEventListener("input", handleLivePreviewChange);
         livePreview.body.addEventListener("contextmenu", handleContextMenu);
+
+        // After loading the new content, revoke the previous URLs
+        if (previousUrls.cssUrl) URL.revokeObjectURL(previousUrls.cssUrl);
+        if (previousUrls.jsUrl) URL.revokeObjectURL(previousUrls.jsUrl);
+        if (previousUrls.contentUrl) URL.revokeObjectURL(previousUrls.contentUrl);
+
+        // Update the cache with the current URLs
+        previousUrls = { cssUrl, jsUrl, contentUrl };
+        const endTime = performance.now();
+        console.log(`Preview loaded in ${endTime - startTime} milliseconds`);
     };
+
+    previewFrame.src = contentUrl;
     isSynchronizing = false;
 }
 
@@ -211,14 +240,6 @@ function saveToLocalStorage(htmlContent, cssContent, jsContent) {
     localStorage.setItem("savedJS", jsContent);
 }
 
-function loadFromLocalStorage() {
-    return {
-        html: localStorage.getItem("savedHTML") || "",
-        css: localStorage.getItem("savedCSS") || "",
-        js: localStorage.getItem("savedJS") || ""
-    };
-}
-
 function prettifyContent(content, parser) {
     return format(content, {
         parser,
@@ -236,6 +257,7 @@ function handleEditorChange(update) {
         //console.log("ChatMD editor changed");
         const markdownContent = editors.chatMD.state.doc.toString();
         if (!markdownContent) return;
+        localStorage.setItem("savedChatMD", markdownContent);
         if (markdownContent.endsWith(">go")) {
             processOpenAIChatResponse(markdownContent, { doc, cssDoc, jsDoc });
         }
@@ -406,8 +428,6 @@ function processOpenAIChatResponse(markdownContent, editorsContent) {
     const rawSettings = parseSettings(parts);
     const { apiKey, options } = prepareOptions(rawSettings);
 
-    console.log("API Key:", apiKey);
-
     // Set default API options if not present.
     options.model = options.model || "gpt-4o";
     options.max_tokens = options.max_tokens || 2000;
@@ -454,7 +474,7 @@ function processOpenAIChatResponse(markdownContent, editorsContent) {
 
     // Retrieve available models then proceed with API requests.
     listAvailableModels(apiKey).then(availableModels => {
-        console.log("Using settings:", options);
+        console.log("Current memory:", optionsToSend.messages);
 
         fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
@@ -467,7 +487,7 @@ function processOpenAIChatResponse(markdownContent, editorsContent) {
             .then(res => res.ok ? res.json() : Promise.reject(`Network error: ${res.statusText}`))
             .then(data => {
                 const content = data.choices[0].message.content;
-                const fullChat = [...options.messages, { role: "assistant", content }, { role: "user", content: "\n" }];
+                const fullChat = [...options.messages, { role: "assistant", content }, { role: "user", content: "" }];
 
                 // Update available models and rebuild markdown content.
                 delete options.messages;
@@ -478,7 +498,7 @@ function processOpenAIChatResponse(markdownContent, editorsContent) {
 
                 // Save state for future reference.
                 localStorage.setItem("savedChatMD", updatedMarkdown);
-                console.log("ChatMD updated");
+                //console.log("ChatMD updated");
                 isProcessingOpenAIResponse = false;
             })
             .catch(err => {
@@ -531,28 +551,46 @@ async function listAvailableModels(apiKey) {
 
 
 
-function initialize() {
-    if (localStorage.getItem("savedHTML")) {
-        const { html, css, js } = loadFromLocalStorage();
-        //const [savedContent, savedCSS, savedJS] = ['savedHTML', 'savedCSS', 'savedJS'].map(item => localStorage.getItem(item));
-        const markdownChat = localStorage.getItem("savedChatMD");
-        if (markdownChat) {
+function loadFromLocalStorage(keys) {
+    return keys.reduce((accumulator, key) => {
+        accumulator[key] = localStorage.getItem(key) || "";
+        return accumulator;
+    }, {});
+}
+
+
+async function initialize() {
+    const keys = ["savedHTML", "savedCSS", "savedJS", "savedChatMD"];
+    const { savedHTML, savedCSS, savedJS, savedChatMD } = loadFromLocalStorage(keys);
+
+    if (savedHTML) {
+        if (savedChatMD) {
             editors.chatMD.dispatch({
-                changes: { from: 0, to: editors.chatMD.state.doc.length, insert: markdownChat }
+                changes: { from: 0, to: editors.chatMD.state.doc.length, insert: savedChatMD }
             });
         }
-        setEditorContent(html, css, js);
-        handleEditorChange({ docChanged: true });
+
+        setEditorContent(savedHTML, savedCSS, savedJS);
     } else {
-        (async () => {
-            const markdownTemplate = await fetchText("HTMLTemplate.md");
-            const htmlTemplate = extractCodeBlockMD(markdownTemplate, "html");
-            const cssTemplate = extractCodeBlockMD(markdownTemplate, "css");
-            const jsTemplate = extractCodeBlockMD(markdownTemplate, "javascript");
-            setEditorContent(htmlTemplate, cssTemplate, jsTemplate);
-            handleEditorChange({ docChanged: true });
-        })();
+        const markdownTemplate = await fetchText("HTMLTemplate.md");
+        const htmlTemplate = extractCodeBlockMD(markdownTemplate, "html");
+        const cssTemplate = extractCodeBlockMD(markdownTemplate, "css");
+        const jsTemplate = extractCodeBlockMD(markdownTemplate, "javascript");
+        const markdownContent = extractCodeBlockMD(markdownTemplate, "chatMD");
+
+        editors.chatMD.dispatch({
+            changes: { from: 0, to: editors.chatMD.state.doc.length, insert: markdownContent }
+        });
+
+        setEditorContent(htmlTemplate, cssTemplate, jsTemplate);
     }
+
+    handleEditorChange({ docChanged: true });
+    // See if the tab name is in the url
+    const urlParams = new URLSearchParams(window.location.search);
+    const tabName = urlParams.get('tab');
+    const activeTab = tabName || localStorage.getItem("activeTab") || "HTMLFileTab";
+    setButtonEvents(buttons, activeTab);
 }
 
 Split(['#editors', '#preview'], {
